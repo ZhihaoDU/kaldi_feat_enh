@@ -1,5 +1,6 @@
 import argparse
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
@@ -156,7 +157,11 @@ if __name__ == '__main__':
         args.max_num_saved_checkpoint = args.early_stopping_patience + 1
 
     logger.info("Initializing the enhancement method, model and optimizer")
-    crn = CRNModel(dim=83, causal=False, units=256, conv_channels=8, use_batch_norm=False, pitch_dims=3).to("cuda")
+    crn = CRNModel(dim=83, causal=False, units=256, conv_channels=8, use_batch_norm=False, pitch_dims=3)
+    if torch.cuda.device_count() > 1:
+        logger.info(f"Let's use {torch.cuda.device_count()} GPUs !")
+        crn = nn.DataParallel(crn)
+    crn.to(device)
     optimizer = torch.optim.Adam(crn.parameters(), args.learning_rate, amsgrad=True)
     logger.info(f"The model has {static_parameters(crn) / 2 ** 20:.2f} M trainable parameters.")
 
