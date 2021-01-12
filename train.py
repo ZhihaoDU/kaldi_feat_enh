@@ -82,9 +82,9 @@ def train(model, opt, my_dataset):
         assert not (np.isnan(train_loss) or np.isinf(train_loss)), logger.critical("Nan or Inf loss detected!!")
         if global_step % 1000 == 0:
             summary_writer.add_scalar(f"train/loss", loss.item(), global_step)
-            add_spect_image(summary_writer, mini_batch["noisy"], f"train/noisy", 4, global_step)
-            add_spect_image(summary_writer, mini_batch["speech"], f"train/speech", 4, global_step)
-            add_spect_image(summary_writer, outs, f"train/enhanced", 4, global_step)
+            add_spect_image(summary_writer, mini_batch["noisy"][:16, :, :], f"train/noisy", 4, global_step)
+            add_spect_image(summary_writer, mini_batch["speech"][:16, :, :], f"train/speech", 4, global_step)
+            add_spect_image(summary_writer, outs[:16, :, :], f"train/enhanced", 4, global_step)
             logger.info(f"Epoch {current_epoch}, step {global_step}: train_loss: {loss.item()}")
         global_step += 1
         # summary_writer.flush()
@@ -113,9 +113,9 @@ def valid(model, opt, my_dataset):
             assert not (np.isnan(valid_loss) or np.isinf(valid_loss)), logger.critical("Nan or Inf loss detected!!")
             if i == 0:
                 summary_writer.add_scalar(f"valid/loss", loss.item(), current_epoch)
-                add_spect_image(summary_writer, mini_batch["noisy"], f"valid/noisy", 4, current_epoch)
-                add_spect_image(summary_writer, mini_batch["speech"], f"valid/speech", 4, current_epoch)
-                add_spect_image(summary_writer, outs, f"valid/speech", 4, current_epoch)
+                add_spect_image(summary_writer, mini_batch["noisy"][:16, :, :], f"valid/noisy", 4, current_epoch)
+                add_spect_image(summary_writer, mini_batch["speech"][:16, :, :], f"valid/speech", 4, current_epoch)
+                add_spect_image(summary_writer, outs[:16, :, :], f"valid/speech", 4, current_epoch)
 
     return valid_loss / my_dataset.__len__()
 
