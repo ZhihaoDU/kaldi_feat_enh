@@ -68,8 +68,8 @@ def train(model, opt, my_dataset):
                 else:
                     mini_batch[key] = value
 
-        outs = model.forward(mini_batch["noisy"], mini_batch["length"])
-        masks = make_nonzero_masks(outs, mini_batch["length"])
+        outs = model.forward(mini_batch["noisy"], mini_batch["length"].squeeze())
+        masks = make_nonzero_masks(outs, mini_batch["length"].squeeze())
         loss = (F.l1_loss(outs, mini_batch["speech"], reduction='none') * masks).sum() / masks.sum()
         opt.zero_grad()
         loss.backward()
@@ -83,7 +83,7 @@ def train(model, opt, my_dataset):
             summary_writer.add_scalar(f"train/loss", loss.item(), global_step)
             add_spect_image(summary_writer, mini_batch["noisy"], f"train/noisy", 4, global_step)
             add_spect_image(summary_writer, mini_batch["speech"], f"train/speech", 4, global_step)
-            add_spect_image(summary_writer, mini_batch["enhanced"], outs, 4, global_step)
+            add_spect_image(summary_writer, outs, f"train/enhanced", 4, global_step)
             logger.info(f"Epoch {current_epoch}, step {global_step}: train_loss: {loss.item()}")
         global_step += 1
         # summary_writer.flush()
@@ -103,8 +103,8 @@ def valid(model, opt, my_dataset):
                 else:
                     mini_batch[key] = value
 
-            outs = model.forward(mini_batch["noisy"], mini_batch["length"])
-            masks = make_nonzero_masks(outs, mini_batch["length"])
+            outs = model.forward(mini_batch["noisy"], mini_batch["length"].squeeze())
+            masks = make_nonzero_masks(outs, mini_batch["length"].squeeze())
             loss = (F.l1_loss(outs, mini_batch["speech"], reduction='none') * masks).sum() / masks.sum()
 
             one_valid_loss = loss.item()
@@ -122,9 +122,9 @@ def valid(model, opt, my_dataset):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_tag", type=str, default="crn", help="Name of this train")
-    parser.add_argument("--train_recipe", '-r', type=str, default="tr/feat.scp",
+    parser.add_argument("--train_recipe", type=str, default="tr/feat.scp",
                         help="Script file of training set including noisy and clean features")
-    parser.add_argument("--valid_recipe", '-r', type=str, default="vc/feat.scp",
+    parser.add_argument("--valid_recipe", type=str, default="vc/feat.scp",
                         help="Script file of valid set including noisy and clean features")
     parser.add_argument("--max_num_saved_checkpoint", type=int, default=10,
                         help="The maximum number of saved checkpoints, early checkpoints will be removed to save disk")

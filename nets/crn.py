@@ -181,7 +181,6 @@ class CRNModel(torch.nn.Module):
             lstm_in = torch.cat([lin, ep], 2)
         else:
             lstm_in = lin
-
         lstm_in = pack_padded_sequence(lstm_in, lens, batch_first=True, enforce_sorted=False)
         h1, _ = self.lstm(lstm_in)
         h1, _ = pad_packed_sequence(h1, batch_first=True, total_length=t)

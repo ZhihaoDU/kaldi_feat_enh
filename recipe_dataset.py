@@ -8,16 +8,16 @@ class MyDataset(Dataset):
         key, recipe = self.pair_list[index]
         # recipe is in format "noisy_feat:clean_feat"
         assert len(recipe.split('|')) == 2
-        noisy_feat_path, clean_feat_path = recipe.split(':')
+        noisy_feat_path, clean_feat_path = recipe.split('|')
         noisy_feat = kaldiio.load_mat(noisy_feat_path)
         clean_feat = kaldiio.load_mat(clean_feat_path)
         # feat in (T, D)
         dim = clean_feat.shape[1]
         noisy = np.zeros((self.seg_length, dim), dtype=np.float32)
         clean = np.zeros((self.seg_length, dim), dtype=np.float32)
-        assert noisy_feat.shape[0] != clean_feat.shape[0], \
+        assert noisy_feat.shape[0] == clean_feat.shape[0], \
             f"The numbers of clean and noisy features do not match ({noisy_feat.shape[0]} != {clean_feat.shape[0]})."
-        if clean.shape[0] <= self.seg_length:
+        if clean_feat.shape[0] <= self.seg_length:
             noisy[:noisy_feat.shape[0], :] = noisy_feat
             clean[:clean_feat.shape[0], :] = clean_feat
             lens = clean_feat.shape[0]
