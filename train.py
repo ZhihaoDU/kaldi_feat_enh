@@ -161,6 +161,8 @@ if __name__ == '__main__':
     if torch.cuda.device_count() > 1:
         logger.info(f"Let's use {torch.cuda.device_count()} GPUs !")
         crn = nn.DataParallel(crn)
+        logger.info(f"Automatically increase the batch size from {args.batch_size} -> {args.batch_size * torch.cuda.device_count()}")
+        args.batch_size *= torch.cuda.device_count()
     crn.to(device)
     optimizer = torch.optim.Adam(crn.parameters(), args.learning_rate, amsgrad=True)
     logger.info(f"The model has {static_parameters(crn) / 2 ** 20:.2f} M trainable parameters.")
