@@ -1,0 +1,221 @@
+import argparse
+import torch
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+import numpy as np
+from nets.crn import CRNModel
+import os
+from utils.logger_utils import get_logger
+from recipe_dataset import MyDataset
+from collec_function import basic_collection_function
+from torch.utils.data import DataLoader
+from utils.plot_utils import add_spect_image
+
+
+def set_seed(manual_seed):
+    import random
+    from torch.backends import cudnn
+    random.seed(manual_seed)
+    torch.manual_seed(manual_seed)
+    np.random.seed(manual_seed)
+    cudnn.benchmark = True
+    # cudnn.deterministic = True
+
+
+def static_parameters(model):
+    return sum(p.numel() for p in model.parameters())
+
+
+def save_checkpoint(pt_path, model, optimizer, global_step, current_epoch, train_loss, valid_loss):
+    torch.save({
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "global_step": global_step,
+        "global_epoch": current_epoch,
+        "train_loss": train_loss,
+        "valid_loss": valid_loss}, pt_path)
+
+
+def load_checkpoint(pt_path, model, optimizer):
+    checkpoint = torch.load(pt_path)
+    model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    step = checkpoint['global_step']
+    epoch = checkpoint['global_epoch']
+    train_loss = checkpoint['train_loss']
+    valid_loss = checkpoint['valid_loss']
+    return step, epoch, train_loss, valid_loss
+
+
+def make_nonzero_masks(xs, lens):
+    masks = torch.zeros_like(xs)
+    for i in range(lens.size(0)):
+        masks[i, :lens[i], :] = 1.
+    return masks
+
+
+def train(model, opt, my_dataset):
+    train_loss = 0
+    global global_step
+    for i, np_batch in enumerate(my_dataset):
+        with torch.no_grad():
+            mini_batch = {}
+            for key, value in np_batch.items():
+                if value.dtype == np.float32 or value.dtype == np.float64:
+                    mini_batch[key] = torch.Tensor(value).to(device)
+                elif value.dtype == np.int32:
+                    mini_batch[key] = torch.Tensor(value).long().to(device)
+                else:
+                    mini_batch[key] = value
+
+        outs = model.forward(mini_batch["noisy"], mini_batch["length"])
+        masks = make_nonzero_masks(outs, mini_batch["length"])
+        loss = (F.l1_loss(outs, mini_batch["speech"], reduction='none') * masks).sum() / masks.sum()
+        opt.zero_grad()
+        loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        optimizer.step()
+        train_loss += loss.item()
+
+        assert not (np.isnan(train_loss) or np.isinf(train_loss)), logger.critical("Nan or Inf loss detected!!")
+        if global_step % 100 == 0:
+            summary_writer.add_scalar(f"train/loss", loss.item(), global_step)
+            add_spect_image(summary_writer, mini_batch["noisy"], f"train/noisy", 4, global_step)
+            add_spect_image(summary_writer, mini_batch["speech"], f"train/speech", 4, global_step)
+            add_spect_image(summary_writer, mini_batch["enhanced"], outs, 4, global_step)
+
+        global_step += 1
+        # summary_writer.flush()
+    return train_loss / my_dataset.__len__()
+
+
+def valid(model, opt, my_dataset):
+    valid_loss = 0
+    for i, np_batch in enumerate(my_dataset):
+        with torch.no_grad():
+            mini_batch = {}
+            for key, value in np_batch.items():
+                if value.dtype == np.float32 or value.dtype == np.float64:
+                    mini_batch[key] = torch.Tensor(value).to(device)
+                elif value.dtype == np.int32:
+                    mini_batch[key] = torch.Tensor(value).long().to(device)
+                else:
+                    mini_batch[key] = value
+
+            outs = model.forward(mini_batch["noisy"], mini_batch["length"])
+            masks = make_nonzero_masks(outs, mini_batch["length"])
+            loss = (F.l1_loss(outs, mini_batch["speech"], reduction='none') * masks).sum() / masks.sum()
+
+            one_valid_loss = loss.item()
+            valid_loss += one_valid_loss
+            assert not (np.isnan(valid_loss) or np.isinf(valid_loss)), logger.critical("Nan or Inf loss detected!!")
+            if i == 0:
+                summary_writer.add_scalar(f"valid/loss", loss.item(), current_epoch)
+                add_spect_image(summary_writer, mini_batch["noisy"], f"valid/noisy", 4, current_epoch)
+                add_spect_image(summary_writer, mini_batch["speech"], f"valid/speech", 4, current_epoch)
+                add_spect_image(summary_writer, outs, f"valid/speech", 4, current_epoch)
+
+    return valid_loss / my_dataset.__len__()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run_tag", type=str, default="crn", help="Name of this train")
+    parser.add_argument("--train_recipe", '-r', type=str, default="tr/feat.scp",
+                        help="Script file of training set including noisy and clean features")
+    parser.add_argument("--valid_recipe", '-r', type=str, default="vc/feat.scp",
+                        help="Script file of valid set including noisy and clean features")
+    parser.add_argument("--max_num_saved_checkpoint", type=int, default=10,
+                        help="The maximum number of saved checkpoints, early checkpoints will be removed to save disk")
+    parser.add_argument("--early_stopping_patience", type=int, default=10, help="The patience of early stopping")
+    parser.add_argument("--grad_clip", type=float, default=0, help="Clip the gradient to a given number")
+    parser.add_argument("--total_epoch", type=int, default=200, help="The total number of training epoch")
+    parser.add_argument("--max_lens", type=int, default=800, help="The maximum length of features")
+    parser.add_argument("--work_num", type=int, default=4, help="The work number of dataloader")
+    parser.add_argument("--cp_path", type=str, default="checkpoints", help="Dictionary of checkpoints")
+    parser.add_argument("--log_path", type=str, default="log", help="Dictionary of log files")
+    parser.add_argument("--tb_path", type=str, default="tensorboard_dir", help="Dictionary of tensorboard summary")
+    parser.add_argument("--batch_size", '-b', type=int, default=32, help="batch size")
+    parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--load_checkpoint", type=str, default=None, help="Checkpoint path to load")
+    parser.add_argument("--train_first", type=bool, default=False, help="Whether to train the model before eval")
+    args = parser.parse_args()
+
+    set_seed(0)
+    device = torch.device("cuda")
+    batch_size = args.batch_size
+    checkpoint_dir = os.path.join(args.cp_path, args.run_tag)
+    tensorboard_dir = os.path.join(args.tb_path, args.run_tag)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(tensorboard_dir, exist_ok=True)
+    os.makedirs(args.log_path, exist_ok=True)
+    logger = get_logger(os.path.join(args.log_path, args.run_tag))
+    summary_writer = SummaryWriter(os.path.join(args.tb_path, args.run_tag), flush_secs=10)
+    if args.max_num_saved_checkpoint > args.early_stopping_patience:
+        args.max_num_saved_checkpoint = args.early_stopping_patience + 1
+
+    logger.info("Initializing the enhancement method, model and optimizer")
+    crn = CRNModel(dim=83, causal=False, units=256, conv_channels=8, use_batch_norm=False, pitch_dims=3).to("cuda")
+    optimizer = torch.optim.Adam(crn.parameters(), args.learning_rate, amsgrad=True)
+    logger.info(f"The model has {static_parameters(crn) / 2 ** 20:.2f} M trainable parameters.")
+
+    current_epoch = 0
+    global_step = 0
+    if args.load_checkpoint is not None:
+        current_epoch, global_step, tr_loss, vc_loss = load_checkpoint(args.load_checkpoint, crn, optimizer)
+        logger.info(f"Load checkpoint from {args.load_checkpoint}, epoch {current_epoch}, step {global_step}")
+
+    train_set = MyDataset(args.train_recipe, args.max_lens)
+    train_dataset = DataLoader(train_set, args.batch_size, True, num_workers=args.work_num,
+                               collate_fn=basic_collection_function, drop_last=True, pin_memory=True)
+    valid_set = MyDataset(args.valid_recipe, args.max_lens)
+    valid_dataset = DataLoader(valid_set, args.batch_size, True, num_workers=args.work_num,
+                               collate_fn=basic_collection_function, drop_last=True, pin_memory=True)
+
+    lowest_valid_loss = None
+    early_stopping_patience = args.early_stopping_patience
+    saved_checkpoint_list = []
+
+    if not args.train_first:
+        with torch.no_grad():
+            valid_loss = valid(crn, optimizer, valid_dataset)
+        logger.info(f"Initial valid loss: {valid_loss:.6f}")
+        summary_writer.add_scalar("valid/loss", valid_loss, current_epoch)
+
+    for _ in range(args.total_epoch):
+        train_loss = train(crn, optimizer, train_dataset)
+        assert not (np.isnan(train_loss) or np.isinf(train_loss)), f"Invalid training loss {train_loss}."
+        current_epoch += 1
+        with torch.no_grad():
+            valid_loss = valid(crn, optimizer, valid_dataset)
+            assert not (np.isnan(train_loss) or np.isinf(train_loss)), f"Invalid validation loss {valid_loss}."
+        logger.info(f"Epoch {current_epoch:03d}, step {global_step:06d}: "
+                    f"Train loss {train_loss:.6f}, valid loss {valid_loss:.6f}")
+        summary_writer.add_scalar("valid/loss", valid_loss, current_epoch)
+        checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{global_step:09d}.pt")
+        save_checkpoint(checkpoint_path, crn, optimizer, global_step, current_epoch, train_loss, valid_loss)
+        logger.info(f"Save the model to {checkpoint_path}")
+
+        # remove too old checkpoint
+        saved_checkpoint_list.append(checkpoint_path)
+        if len(saved_checkpoint_list) > args.max_num_saved_checkpoint:
+            to_remove_checkpoint = saved_checkpoint_list[-args.max_num_saved_checkpoint - 1]
+            os.remove(to_remove_checkpoint)
+            logger.info(f"Remove {to_remove_checkpoint}")
+
+        # save best model as best_model.pt
+        if lowest_valid_loss is None or valid_loss <= lowest_valid_loss:
+            lowest_valid_loss = valid_loss
+            save_checkpoint(os.path.join(checkpoint_dir, "best_model.pt"), crn, optimizer, global_step,
+                            current_epoch, train_loss, valid_loss)
+            early_stopping_patience = args.early_stopping_patience
+            logger.info(f"Save the best model!")
+
+        # early stopping
+        if valid_loss > lowest_valid_loss:
+            early_stopping_patience -= 1
+            if early_stopping_patience <= 0:
+                logger.critical("Early stopped!")
+                break
+    logger.critical("Train completed!")
