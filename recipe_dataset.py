@@ -7,7 +7,7 @@ class MyDataset(Dataset):
     def __getitem__(self, index):
         key, recipe = self.pair_list[index]
         # recipe is in format "noisy_feat:clean_feat"
-        assert len(recipe.split(':')) == 2
+        assert len(recipe.split('|')) == 2
         noisy_feat_path, clean_feat_path = recipe.split(':')
         noisy_feat = kaldiio.load_mat(noisy_feat_path)
         clean_feat = kaldiio.load_mat(clean_feat_path)
