@@ -162,8 +162,8 @@ class CRNModel(torch.nn.Module):
             Tensor: Batch of the enhanced feature sequences (B, Lmax, eunits).
         """
         if self.pitch_dims > 0:
-            spec = xs[:, :, :-3].unsqueeze(1)
-            ps = xs[:, :, -3:].permute(0, 2, 1)
+            spec = xs[:, :, :-self.pitch_dims].unsqueeze(1)
+            ps = xs[:, :, -self.pitch_dims:].permute(0, 2, 1)
         else:
             spec = xs.unsqueeze(-1)
             ps = None

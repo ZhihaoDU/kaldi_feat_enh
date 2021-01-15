@@ -11,6 +11,7 @@ from recipe_dataset import MyDataset
 from collec_function import basic_collection_function
 from torch.utils.data import DataLoader
 from utils.plot_utils import add_spect_image
+import tqdm
 
 
 def set_seed(manual_seed):
@@ -45,7 +46,7 @@ def load_checkpoint(pt_path, model, optimizer):
     epoch = checkpoint['global_epoch']
     train_loss = checkpoint['train_loss']
     valid_loss = checkpoint['valid_loss']
-    return step, epoch, train_loss, valid_loss
+    return epoch, step, train_loss, valid_loss
 
 
 def make_nonzero_masks(xs, lens):
@@ -55,7 +56,19 @@ def make_nonzero_masks(xs, lens):
     return masks
 
 
+def calc_loss(outs, targets, masks, use_split_loss, loss_func):
+    error = loss_func(outs, targets, reduction='none') * masks
+    if use_split_loss:
+        pitch_loss = error[:, :, -3:].sum() / masks[:, :, -3:].sum()
+        fbank_loss = error[:, :, :-3].sum() / masks[:, :, :-3].sum()
+        return {"pitch_loss": pitch_loss, "fbank_loss": fbank_loss, "loss": pitch_loss+fbank_loss}
+    else:
+        loss = error.sum() / masks.sum()
+        return {"loss": loss}
+
+
 def train(model, opt, my_dataset):
+    pbar = tqdm.tqdm(total=my_dataset.__len__(), ascii=True, unit="batch")
     train_loss = 0
     global global_step
     for i, np_batch in enumerate(my_dataset):
@@ -71,27 +84,35 @@ def train(model, opt, my_dataset):
 
         outs = model.forward(mini_batch["noisy"], mini_batch["length"].squeeze())
         masks = make_nonzero_masks(outs, mini_batch["length"].squeeze())
-        loss = (F.l1_loss(outs, mini_batch["speech"], reduction='none') * masks).sum() / masks.sum()
-        opt.zero_grad()
+        loss_dict = calc_loss(outs, mini_batch["speech"], masks, args.use_split_loss, loss_func)
+        loss = loss_dict["loss"]
+
+        if np.isnan(loss.item()) or np.isinf(loss.item()):
+            logger.warn("The loss is Nan or Inf, skip it.")
+            continue
+
+        model.zero_grad()
         loss.backward()
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        optimizer.step()
+        opt.step()
         train_loss += loss.item()
 
-        assert not (np.isnan(train_loss) or np.isinf(train_loss)), logger.critical("Nan or Inf loss detected!!")
         if global_step % 1000 == 0:
-            summary_writer.add_scalar(f"train/loss", loss.item(), global_step)
+            for key, value in loss_dict.items():
+                summary_writer.add_scalar(f"train/{key}", value.item(), global_step)
             add_spect_image(summary_writer, mini_batch["noisy"][:16, :, :], f"train/noisy", 4, global_step)
             add_spect_image(summary_writer, mini_batch["speech"][:16, :, :], f"train/speech", 4, global_step)
             add_spect_image(summary_writer, outs[:16, :, :], f"train/enhanced", 4, global_step)
             logger.info(f"Epoch {current_epoch}, step {global_step}: train_loss: {loss.item()}")
         global_step += 1
+        pbar.update(1)
         # summary_writer.flush()
     return train_loss / my_dataset.__len__()
 
 
 def valid(model, opt, my_dataset):
+    pbar = tqdm.tqdm(total=my_dataset.__len__(), ascii=True, unit="batch")
     valid_loss = 0
     for i, np_batch in enumerate(my_dataset):
         with torch.no_grad():
@@ -106,17 +127,19 @@ def valid(model, opt, my_dataset):
 
             outs = model.forward(mini_batch["noisy"], mini_batch["length"].squeeze())
             masks = make_nonzero_masks(outs, mini_batch["length"].squeeze())
-            loss = (F.l1_loss(outs, mini_batch["speech"], reduction='none') * masks).sum() / masks.sum()
+            loss_dict = calc_loss(outs, mini_batch["speech"], masks, args.use_split_loss, loss_func)
+            loss = loss_dict["loss"]
 
             one_valid_loss = loss.item()
             valid_loss += one_valid_loss
             assert not (np.isnan(valid_loss) or np.isinf(valid_loss)), logger.critical("Nan or Inf loss detected!!")
             if i == 0:
-                summary_writer.add_scalar(f"valid/loss", loss.item(), current_epoch)
+                for key, value in loss_dict.items():
+                    summary_writer.add_scalar(f"valid/{key}", value.item(), current_epoch)
                 add_spect_image(summary_writer, mini_batch["noisy"][:16, :, :], f"valid/noisy", 4, current_epoch)
                 add_spect_image(summary_writer, mini_batch["speech"][:16, :, :], f"valid/speech", 4, current_epoch)
                 add_spect_image(summary_writer, outs[:16, :, :], f"valid/speech", 4, current_epoch)
-
+            pbar.update(1)
     return valid_loss / my_dataset.__len__()
 
 
@@ -141,6 +164,9 @@ if __name__ == '__main__':
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--load_checkpoint", type=str, default=None, help="Checkpoint path to load")
     parser.add_argument("--train_first", type=bool, default=False, help="Whether to train the model before eval")
+    parser.add_argument("--loss_type", type=str, default="l1", choices=['l1', 'l2'], help="The loss function")
+    parser.add_argument("--use_split_loss", type=bool, default=False,
+                        help="Whether to calculate loss for pitch and fbank features, separately")
     args = parser.parse_args()
 
     set_seed(0)
@@ -158,14 +184,18 @@ if __name__ == '__main__':
 
     logger.info("Initializing the enhancement method, model and optimizer")
     crn = CRNModel(dim=83, causal=False, units=256, conv_channels=8, use_batch_norm=False, pitch_dims=3)
-    if torch.cuda.device_count() > 1:
-        logger.info(f"Let's use {torch.cuda.device_count()} GPUs !")
-        crn = nn.DataParallel(crn)
-        logger.info(f"Automatically increase the batch size from {args.batch_size} -> {args.batch_size * torch.cuda.device_count()}")
-        args.batch_size *= torch.cuda.device_count()
+    ngpu = torch.cuda.device_count()
+    if ngpu > 1:
+        logger.info(f"Let's use {ngpu} GPUs !")
+        crn = nn.DataParallel(crn, device_ids=list(range(ngpu)))
+        logger.info(f"Automatically increase the batch size from {args.batch_size} -> {args.batch_size * ngpu}")
+        args.batch_size *= ngpu
+        args.work_num *= ngpu
     crn.to(device)
     optimizer = torch.optim.Adam(crn.parameters(), args.learning_rate, amsgrad=True)
     logger.info(f"The model has {static_parameters(crn) / 2 ** 20:.2f} M trainable parameters.")
+    loss_func = F.l1_loss if args.loss_type == 'l1' else F.mse_loss
+    logger.info(f"Use {args.loss_type} loss, use_split_loss: {args.use_split_loss}")
 
     current_epoch = 0
     global_step = 0
