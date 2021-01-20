@@ -69,6 +69,7 @@ def calc_loss(outs, targets, masks, use_split_loss, loss_func):
 
 def train(model, opt, my_dataset):
     pbar = tqdm.tqdm(total=my_dataset.__len__(), ascii=True, unit="batch")
+    model.train()
     train_loss = 0
     global global_step
     for i, np_batch in enumerate(my_dataset):
@@ -113,6 +114,7 @@ def train(model, opt, my_dataset):
 
 def valid(model, opt, my_dataset):
     pbar = tqdm.tqdm(total=my_dataset.__len__(), ascii=True, unit="batch")
+    model.eval()
     valid_loss = 0
     for i, np_batch in enumerate(my_dataset):
         with torch.no_grad():
