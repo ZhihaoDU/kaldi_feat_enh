@@ -169,7 +169,6 @@ if __name__ == '__main__':
     parser.add_argument("--loss_type", type=str, default="l1", choices=['l1', 'l2'], help="The loss function")
     parser.add_argument("--use_split_loss", type=bool, default=False,
                         help="Whether to calculate loss for pitch and fbank features, separately")
-    parser.add_argument("--cmvn_path", type=str, default=None, help="The cmvn ark file to apply...")
     args = parser.parse_args()
 
     set_seed(0)
@@ -206,10 +205,10 @@ if __name__ == '__main__':
         current_epoch, global_step, tr_loss, vc_loss = load_checkpoint(args.load_checkpoint, crn, optimizer)
         logger.info(f"Load checkpoint from {args.load_checkpoint}, epoch {current_epoch}, step {global_step}")
 
-    train_set = MyDataset(args.train_recipe, args.max_lens, cmvn_path=args.cmvn_path, reverse_cmvn=False)
+    train_set = MyDataset(args.train_recipe, args.max_lens)
     train_dataset = DataLoader(train_set, args.batch_size, True, num_workers=args.work_num,
                                collate_fn=basic_collection_function, drop_last=True, pin_memory=True)
-    valid_set = MyDataset(args.valid_recipe, args.max_lens, cmvn_path=args.cmvn_path, reverse_cmvn=False)
+    valid_set = MyDataset(args.valid_recipe, args.max_lens)
     valid_dataset = DataLoader(valid_set, args.batch_size, True, num_workers=args.work_num,
                                collate_fn=basic_collection_function, drop_last=True, pin_memory=True)
 
